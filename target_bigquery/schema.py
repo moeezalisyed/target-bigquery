@@ -82,10 +82,12 @@ def filter(schema, record):
 
 def define_schema(field, name):
     schema_name = name
+    schema_type = None
     schema_description = None
     schema_fields = ()
 
     field_type, nullable = get_type(field)
+    schema_mode = "NULLABLE" if nullable else "required"
 
     if field_type == "anyOf":
         nullable = False
@@ -126,7 +128,6 @@ def define_schema(field, name):
     elif field_type == "number":
         schema_type = "FLOAT"
 
-    schema_mode = "NULLABLE" if nullable else "required"
     if not schema_type:
         schema_type = field_type
 
