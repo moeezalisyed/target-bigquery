@@ -326,7 +326,6 @@ def main():
         truncate = False
 
     table_name = config.get("table_name", None)
-    table_suffix = config.get("table_suffix")
 
     validate_records = config.get("validate_records", True)
 
@@ -347,7 +346,6 @@ def main():
             input,
             truncate=truncate,
             validate_records=validate_records,
-            table_suffix=table_suffix,
             table_name=table_name
         )
 
