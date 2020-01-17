@@ -12,7 +12,7 @@ import urllib
 import pkg_resources
 import decimal
 
-from jsonschema import validate
+from jsonschema import validate as json_schema_validation
 import singer
 
 from oauth2client import tools
@@ -67,14 +67,13 @@ def persist_lines_job(
     lines=None,
     truncate=False,
     validate_records=True,
-    table_suffix=None,
+    table_name=None,
 ):
     state = None
     schemas = {}
     key_properties = {}
     rows = {}
     errors = {}
-    table_suffix = table_suffix or ""
 
     class DecimalEncoder(json.JSONEncoder):
         # pylint: disable=method-hidden
@@ -85,6 +84,16 @@ def persist_lines_job(
 
     bigquery_client = bigquery.Client(project=project_id)
 
+    # If the dataset does not exist on BigQuery - create it here
+    dataset_ref = bigquery_client.dataset(dataset_id)
+    dataset = Dataset(dataset_ref)
+    try:
+        dataset = bigquery_client.create_dataset(Dataset(dataset_ref)) or Dataset(
+            dataset_ref
+        )
+    except exceptions.Conflict:
+        pass
+
     for line in lines:
         try:
             msg = singer.parse_message(line)
@@ -93,7 +102,8 @@ def persist_lines_job(
             raise
 
         if isinstance(msg, singer.RecordMessage):
-            table_name = msg.stream + table_suffix
+            if table_name is None:
+                table_name = msg.stream
 
             if table_name not in schemas:
                 raise Exception(
@@ -105,7 +115,7 @@ def persist_lines_job(
             schema = schemas[table_name]
 
             if validate_records:
-                validate(msg.record, schema)
+                json_schema_validation(msg.record, schema)
 
             new_rec = filter(schema, msg.record)
 
@@ -121,7 +131,8 @@ def persist_lines_job(
             state = msg.value
 
         elif isinstance(msg, singer.SchemaMessage):
-            table_name = msg.stream + table_suffix
+            if table_name is None:
+                table_name = msg.stream
 
             if table_name in rows:
                 continue
@@ -171,7 +182,7 @@ def persist_lines_job(
     return state
 
 
-def persist_lines_stream(project_id, dataset_id, lines=None, validate_records=True):
+def persist_lines_stream(project_id, dataset_id, lines=None, validate_records=True,table_name=None):
     state = None
     schemas = {}
     key_properties = {}
@@ -198,29 +209,40 @@ def persist_lines_stream(project_id, dataset_id, lines=None, validate_records=Tr
             raise
 
         if isinstance(msg, singer.RecordMessage):
-            if msg.stream not in schemas:
+            if table_name is None:
+                table = msg.stream
+            else:
+                table = table_name
+                schemas[table] = schemas[msg.stream]
+                tables[table] = tables[msg.stream]
+
+            if table not in schemas:
                 raise Exception(
                     "A record for stream {} was encountered before a corresponding schema".format(
-                        msg.stream
+                        table
                     )
                 )
 
-            schema = schemas[msg.stream]
+            schema = schemas[table]
+            record = msg.record
 
             if validate_records:
-                validate(msg.record, schema)
+                json_schema_validation(msg.record, schema)
+                for col_name, record_value in record.items():
+                    if isinstance(record_value, decimal.Decimal):
+                        record[col_name] = str(record_value)
 
             err = None
             try:
-                err = bigquery_client.insert_rows_json(tables[msg.stream], [msg.record])
+                err = bigquery_client.insert_rows_json(tables[table], [msg.record])
             except Exception as exc:
                 logger.error(
-                    f"failed to insert rows for {tables[msg.stream]}: {str(exc)}\n{msg.record}"
+                    f"failed to insert rows for {tables[table]}: {str(exc)}\n{msg.record}"
                 )
                 raise
 
-            errors[msg.stream] = err
-            rows[msg.stream] += 1
+            errors[table] = err
+            rows[table] += 1
 
             state = None
 
@@ -229,7 +251,11 @@ def persist_lines_stream(project_id, dataset_id, lines=None, validate_records=Tr
             state = msg.value
 
         elif isinstance(msg, singer.SchemaMessage):
-            table = msg.stream
+            if table_name is None:
+                table = msg.stream
+            else:
+                table = table_name
+
             schemas[table] = msg.schema
             key_properties[table] = msg.key_properties
             tables[table] = bigquery.Table(
@@ -299,6 +325,7 @@ def main():
     else:
         truncate = False
 
+    table_name = config.get("table_name", None)
     table_suffix = config.get("table_suffix")
 
     validate_records = config.get("validate_records", True)
@@ -311,6 +338,7 @@ def main():
             config["dataset_id"],
             input,
             validate_records=validate_records,
+            table_name=table_name
         )
     else:
         state = persist_lines_job(
@@ -320,6 +348,7 @@ def main():
             truncate=truncate,
             validate_records=validate_records,
             table_suffix=table_suffix,
+            table_name=table_name
         )
 
     emit_state(state)
